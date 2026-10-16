@@ -1,0 +1,30 @@
+# Runtime database and SQLite sidecars
+assets.db
+assets.db-*
+*.db-wal
+*.db-shm
+
+# Private, machine-specific state
+config.json
+secret.key
+deployment-state*.json
+
+# Generated caches and logs
+thumbnails/
+media_cache/
+__pycache__/
+*.py[cod]
+*.log
+
+# Local backups, builds and virtual environments
+backups/
+dist/
+*.backup
+*.tmp
+.venv/
+venv/
+.qa-install-*/
+
+# Optional offline payloads are release artifacts, not source
+offline/
+offline-model-cache/

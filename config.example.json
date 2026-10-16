@@ -1,0 +1,11 @@
+{
+  "asset_root": "C:\\Users\\YOUR_NAME\\Documents\\Home Cloud Library",
+  "app_name": "Home Cloud",
+  "port": 8080,
+  "ai_mode": "standard",
+  "chat_enabled": true,
+  "chat_allow_anonymous": true,
+  "chat_allow_guests": true,
+  "chat_retention_days": 30,
+  "thumbnail_quality": 85
+}
