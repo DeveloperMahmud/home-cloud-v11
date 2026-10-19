@@ -7,5 +7,8 @@
   "chat_allow_anonymous": true,
   "chat_allow_guests": true,
   "chat_retention_days": 30,
-  "thumbnail_quality": 85
+  "thumbnail_quality": 85,
+  "update_repo": "DeveloperMahmud/home-cloud-v11",
+  "update_channel": "beta",
+  "update_auto_check": true
 }

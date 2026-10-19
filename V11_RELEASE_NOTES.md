@@ -1,5 +1,14 @@
 # Home Cloud v11 Preview
 
+## Beta 2 — local-first update system and media polish
+
+- Added an Admin Update Center with configurable GitHub repository and Stable/Beta channels.
+- Added verified small update ZIP downloads, manual offline update upload, application-file backup, automatic failure rollback and restart.
+- Runtime data is protected: updates cannot replace the SQLite database, machine configuration, secret key, original assets, thumbnails, media cache or AI cache.
+- Added `Build_Update_Package_v11.ps1`; normal code/UI releases no longer require rebuilding all three installer packages.
+- Added the advanced image viewer with previous/next navigation and slideshow, browser-compatible local video cache, polished mobile controls/fullscreen behavior, and file-type icons.
+- Improved uploads with explicit conflict choices and kept folder uploads, copy/move destination picking and guest/client permissions consistent.
+
 ## Release hardening update
 
 - Runtime networking is now strictly local-only; public-IP geolocation and public-address LAN probes were removed.

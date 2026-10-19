@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $packageRoot = $PSScriptRoot
 $target = [System.IO.Path]::GetFullPath($InstallPath)
-$required = @('app.py','serve.py','templates\index.html','requirements.txt','HomeCloud_Start.cmd')
+$required = @('app.py','serve.py','homecloud_updater.py','apply_update.py','templates\index.html','requirements.txt','HomeCloud_Start.cmd')
 foreach ($name in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $name))) {
         throw "The v11 package is incomplete: $name was not found."
@@ -62,7 +62,7 @@ if ($existing) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $backup = Join-Path (Split-Path $target -Parent) "HomeCloud_Pre_v11_$stamp"
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
-    foreach ($name in @('app.py','serve.py','backup_local.py','requirements.txt','requirements-ai.txt','HomeCloud_Start.cmd','config.json','secret.key','assets.db')) {
+    foreach ($name in @('app.py','serve.py','homecloud_updater.py','apply_update.py','backup_local.py','requirements.txt','requirements-ai.txt','HomeCloud_Start.cmd','config.json','secret.key','assets.db')) {
         $source = Join-Path $target $name
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $backup $name) -Force }
     }
@@ -76,7 +76,7 @@ New-Item -ItemType Directory -Path $target -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $target 'templates') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $target 'static') -Force | Out-Null
 
-foreach ($name in @('app.py','serve.py','backup_local.py','requirements.txt','requirements-ai.txt','HomeCloud_Start.cmd','HomeCloud_Backup.cmd','Create_Daily_Backup_Task.cmd','Remove_Daily_Backup_Task.cmd','Configure_HomeCloud_Firewall_v11.ps1','Configure_HomeCloud_Firewall_v11.cmd')) {
+foreach ($name in @('app.py','serve.py','homecloud_updater.py','apply_update.py','backup_local.py','requirements.txt','requirements.lock.txt','requirements-ai.txt','requirements-ai.lock.txt','HomeCloud_Start.cmd','HomeCloud_Backup.cmd','Create_Daily_Backup_Task.cmd','Remove_Daily_Backup_Task.cmd','Configure_HomeCloud_Firewall_v11.ps1','Configure_HomeCloud_Firewall_v11.cmd')) {
     $source = Join-Path $packageRoot $name
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $target $name) -Force }
 }
@@ -92,7 +92,7 @@ if (Test-Path -LiteralPath (Join-Path $packageRoot 'static\favicon.svg')) {
 if (-not (Test-Path -LiteralPath (Join-Path $target 'config.json'))) {
     $library = if ($LibraryPath.Trim()) { [IO.Path]::GetFullPath($LibraryPath) } else { Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Home Cloud Library' }
     New-Item -ItemType Directory -Path $library -Force | Out-Null
-    @{ asset_root = $library; port = 8080; app_name = 'Home Cloud'; ai_mode = $(if ($Mode -eq 'FullAI') {'full'} else {'standard'}); chat_enabled = $true; chat_allow_anonymous = $true; chat_allow_guests = $true; chat_retention_days = 30; thumbnail_quality = 85 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $target 'config.json') -Encoding UTF8
+    @{ asset_root = $library; port = 8080; app_name = 'Home Cloud'; ai_mode = $(if ($Mode -eq 'FullAI') {'full'} else {'standard'}); chat_enabled = $true; chat_allow_anonymous = $true; chat_allow_guests = $true; chat_retention_days = 30; thumbnail_quality = 85; update_repo = 'DeveloperMahmud/home-cloud-v11'; update_channel = 'beta'; update_auto_check = $true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $target 'config.json') -Encoding UTF8
 }
 $configPath = Join-Path $target 'config.json'
 $configData = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json

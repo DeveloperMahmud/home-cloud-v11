@@ -11,6 +11,10 @@ $packageRoot = Join-Path $dist 'packages'
 $distFull = [IO.Path]::GetFullPath($dist).TrimEnd('\')
 $packageFull = [IO.Path]::GetFullPath($packageRoot)
 if (-not $packageFull.StartsWith($distFull + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe package output path.' }
+$appText = Get-Content -LiteralPath (Join-Path $root 'app.py') -Raw -Encoding UTF8
+$versionMatch = [regex]::Match($appText, '(?m)^APP_VERSION\s*=\s*["'']([^"'']+)["'']')
+if (-not $versionMatch.Success) { throw 'Could not read APP_VERSION from app.py.' }
+$appVersion = $versionMatch.Groups[1].Value.TrimStart('v')
 
 & (Join-Path $root 'Build_Release_v11.ps1')
 if (-not (Test-Path -LiteralPath $baseStage)) { throw 'Base release staging folder was not created.' }
@@ -34,7 +38,7 @@ function Add-Payload([string]$Target,[string[]]$RelativePaths) {
 }
 
 function Complete-Package([string]$Target,[string]$Flavor,[bool]$Offline,[bool]$FullAI) {
-    @{version='v11.0-dev';flavor=$Flavor;offline=$Offline;full_ai=$FullAI;built_at=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Target 'package-manifest.json') -Encoding UTF8
+    @{version=$appVersion;flavor=$Flavor;offline=$Offline;full_ai=$FullAI;built_at=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Target 'package-manifest.json') -Encoding UTF8
     $zip = Join-Path $dist "$Flavor.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -LiteralPath $Target -DestinationPath $zip -CompressionLevel Optimal
@@ -57,8 +61,14 @@ if ($Package -in @('FullAIOffline','All')) {
     $outputs.Add((Complete-Package $target 'HomeCloud-v11-FullAI-Offline' $true $true))
 }
 
+& (Join-Path $root 'Build_Update_Package_v11.ps1') -Version $appVersion -Channel $(if ($appVersion -match '-') {'beta'} else {'stable'})
+$outputs.Add((Join-Path $dist 'HomeCloud-v11-update.zip'))
+
 $checksumFile = Join-Path $dist 'SHA256SUMS.txt'
-$outputs | ForEach-Object { $hash=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(); "$hash  $([IO.Path]::GetFileName($_))" } | Set-Content -LiteralPath $checksumFile -Encoding ASCII
+$checksumInputs = [System.Collections.Generic.List[string]]::new()
+$outputs | ForEach-Object { $checksumInputs.Add($_) }
+$checksumInputs.Add((Join-Path $dist 'update-manifest.json'))
+$checksumInputs | ForEach-Object { $hash=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(); "$hash  $([IO.Path]::GetFileName($_))" } | Set-Content -LiteralPath $checksumFile -Encoding ASCII
 Write-Host ''
 Write-Host 'Installer packages created:' -ForegroundColor Green
 $outputs | ForEach-Object { $item=Get-Item -LiteralPath $_; Write-Host ("- {0} ({1:N2} GB)" -f $item.FullName,($item.Length/1GB)) }

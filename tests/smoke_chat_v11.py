@@ -61,7 +61,7 @@ def run():
 
         health = alice.get("/api/health").get_json()
         assert health["internet_required"] is False
-        assert health["version"] == "v11.0-dev"
+        assert health["version"] == "11.0.0-beta.2"
         print("Home Cloud v11 LAN chat smoke tests passed.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

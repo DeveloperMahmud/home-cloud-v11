@@ -75,6 +75,20 @@ When `%LOCALAPPDATA%\HomeCloud` already exists, the installer creates a timestam
 
 Database migrations run automatically and retain existing users, assets, embeddings and settings.
 
+### Small GitHub Release updates
+
+After the first v11 installation, an administrator can open **Settings → Update Center** and select Stable or Beta. The official `DeveloperMahmud/home-cloud-v11` repository is preconfigured and can be changed there if the project is forked. Checking/downloading an update is the only part that needs internet; file browsing, transfer, search, viewers, users and LAN Chat remain fully offline.
+
+For each new version, change the application version and build these two small release assets:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Build_Update_Package_v11.ps1 -Version 11.0.1 -Channel stable
+```
+
+Upload `dist\HomeCloud-v11-update.zip` and `dist\update-manifest.json` to the matching GitHub Release. The app verifies the release SHA-256 plus every internal file checksum, rejects unsafe paths, backs up only changed application files, preserves all runtime data, installs, and restarts. A manual offline update ZIP can be uploaded in the same Update Center. The most recent application backup can also be rolled back there.
+
+Use `-IncludeDependencies` only when a release changes Python dependencies; this adds the Standard offline wheelhouse to the update ZIP. Regular code/UI updates stay small. Full installer packages only need rebuilding for new users or when you want refreshed all-in-one installers.
+
 ## Private files that must not be committed
 
 The included `.gitignore` excludes the runtime database, secret key, machine configuration, thumbnails, generated video compatibility cache, deployment state, offline payloads and build output. If any of these files were committed by an older repository, remove them from Git tracking before publishing; `.gitignore` does not untrack files already committed.
@@ -88,6 +102,7 @@ python tests\smoke_v101.py
 python tests\smoke_chat_v11.py
 python tests\smoke_v11_features.py
 python tests\smoke_release_v11.py
+python tests\smoke_updater_v11.py
 powershell -ExecutionPolicy Bypass -File .\Verify_Release_v11.ps1
 ```
 

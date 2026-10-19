@@ -51,7 +51,7 @@ LEXICAL_CANDIDATE_LIMIT = 1000
 AI_SEARCH_CANDIDATE_LIMIT = 10000
 MAX_HEAVY_JOBS = 1
 PERF_BATCH_PAUSE = 0.01
-APP_VERSION = "v11.0-dev"
+APP_VERSION = "11.0.0-beta.2"
 SERVER_STARTED_AT = time.time()
 LOGIN_RATE_WINDOW = 300
 LOGIN_RATE_MAX_FAILURES = 8
@@ -209,6 +209,9 @@ CONFIG_DEFAULTS = {
     "chat_allow_guests": True,
     "chat_retention_days": 30,
     "thumbnail_quality": 85,
+    "update_repo": "DeveloperMahmud/home-cloud-v11",
+    "update_channel": "beta",
+    "update_auto_check": True,
 }
 for _key, _value in CONFIG_DEFAULTS.items():
     CFG.setdefault(_key, _value)
@@ -1866,7 +1869,7 @@ def revoke_guest(gid):
 def get_settings():
     guard=require_perm("manage_settings")
     if guard: return guard
-    return jsonify(asset_root=str(ROOT),port=int(config_value("port") or 8080),host="0.0.0.0",app_name=str(config_value("app_name") or "Home Cloud"),ai_mode=str(config_value("ai_mode") or "full"),thumbnail_quality=int(config_value("thumbnail_quality") or 85),lan_ip=detect_lan_ip(),internet_required=False)
+    return jsonify(asset_root=str(ROOT),port=int(config_value("port") or 8080),host="0.0.0.0",app_name=str(config_value("app_name") or "Home Cloud"),ai_mode=str(config_value("ai_mode") or "full"),thumbnail_quality=int(config_value("thumbnail_quality") or 85),lan_ip=detect_lan_ip(),internet_required=False,version=APP_VERSION,update_repo=str(config_value("update_repo") or ""),update_channel=str(config_value("update_channel") or "beta"),update_auto_check=bool(config_value("update_auto_check")))
 
 @app.post("/api/settings/choose-folder")
 def choose_folder():
@@ -1936,10 +1939,171 @@ def save_settings():
     app_name=re.sub(r"\s+"," ",str(data.get("app_name",config_value("app_name") or "Home Cloud")).strip())[:60] or "Home Cloud"
     ai_mode=str(data.get("ai_mode",config_value("ai_mode") or "full")).lower()
     if ai_mode not in {"standard","full"}: return jsonify(error="AI mode must be Standard or Full."),400
+    update_channel=str(data.get("update_channel",config_value("update_channel") or "beta")).lower()
+    if update_channel not in {"stable","beta"}: return jsonify(error="Update channel must be Stable or Beta."),400
+    update_repo=str(data.get("update_repo",config_value("update_repo") or "")).strip()
+    if update_repo:
+        try:
+            from homecloud_updater import normalize_repo
+            update_repo=normalize_repo(update_repo)
+        except Exception as e:
+            return jsonify(error=str(e)),400
+    update_auto_check=bool(data.get("update_auto_check",config_value("update_auto_check")))
     old_port=int(config_value("port") or 8080)
-    save_config_values({"app_name":app_name,"port":port,"ai_mode":ai_mode,"thumbnail_quality":quality})
+    save_config_values({"app_name":app_name,"port":port,"ai_mode":ai_mode,"thumbnail_quality":quality,"update_repo":update_repo,"update_channel":update_channel,"update_auto_check":update_auto_check})
     log_activity("settings_changed", "Server settings", f"Root: {old_root} -> {ROOT}; port: {old_port} -> {port}; AI mode: {ai_mode}")
-    return jsonify(ok=True,asset_root=str(ROOT),requires_scan=old_root!=str(ROOT),restart_required=old_port!=port,app_name=app_name,port=port,ai_mode=ai_mode,thumbnail_quality=quality)
+    return jsonify(ok=True,asset_root=str(ROOT),requires_scan=old_root!=str(ROOT),restart_required=old_port!=port,app_name=app_name,port=port,ai_mode=ai_mode,thumbnail_quality=quality,update_repo=update_repo,update_channel=update_channel,update_auto_check=update_auto_check)
+
+
+def _update_admin_guard():
+    guard=require_perm("manage_settings")
+    if guard: return guard
+    user=current_user()
+    if not user or user["role"]!="admin": return jsonify(error="Admin only"),403
+    return None
+
+
+def _start_update_runner(*, stage=None, rollback=None):
+    """Launch a detached helper, then stop this server after its response leaves."""
+    runner_dir=APP_DIR / "updates" / "runner"
+    runner_dir.mkdir(parents=True,exist_ok=True)
+    runner=runner_dir / "apply_update.py"
+    shutil.copy2(APP_DIR / "apply_update.py",runner)
+    command=[sys.executable,str(runner),"--app-dir",str(APP_DIR),"--pid",str(os.getpid()),"--python",sys.executable,"--current-version",APP_VERSION]
+    if stage: command.extend(["--stage",str(stage)])
+    if rollback: command.extend(["--rollback",str(rollback)])
+    flags=0
+    if os.name=="nt":
+        flags=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)|getattr(subprocess,"DETACHED_PROCESS",0)|getattr(subprocess,"CREATE_NO_WINDOW",0)
+    subprocess.Popen(command,cwd=str(APP_DIR),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,creationflags=flags)
+    threading.Timer(1.5,lambda: os._exit(0)).start()
+
+
+@app.get("/api/admin/update/status")
+def update_status():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import list_backups,load_state,public_state
+    state=public_state(load_state(APP_DIR))
+    return jsonify(ok=True,current_version=APP_VERSION,repo=str(config_value("update_repo") or ""),channel=str(config_value("update_channel") or "beta"),auto_check=bool(config_value("update_auto_check")),backups=list_backups(APP_DIR),**state)
+
+
+@app.post("/api/admin/update/check")
+def update_check():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import UpdateError,check_github_release,load_state,normalize_repo,public_state,save_state
+    data=request.get_json(silent=True) or {}
+    repo=str(data.get("repo",config_value("update_repo") or "")).strip()
+    channel=str(data.get("channel",config_value("update_channel") or "beta")).lower()
+    auto_check=bool(data.get("auto_check",config_value("update_auto_check")))
+    if not repo: return jsonify(error="Set the GitHub repository first (for example owner/home-cloud)."),400
+    state=load_state(APP_DIR)
+    try:
+        repo=normalize_repo(repo)
+        if channel not in {"stable","beta"}: raise UpdateError("Update channel must be stable or beta.")
+        save_config_values({"update_repo":repo,"update_channel":channel,"update_auto_check":auto_check})
+        checked=check_github_release(repo,channel,APP_VERSION)
+        state.update(status="checked",last_error="",last_check=checked)
+        save_state(APP_DIR,state)
+        log_activity("update_checked",repo,f"Channel: {channel}; available: {checked.get('available',False)}")
+        return jsonify(ok=True,**public_state(state))
+    except UpdateError as e:
+        state.update(status="check_failed",last_error=str(e),checked_at=time.time())
+        save_state(APP_DIR,state)
+        return jsonify(error=str(e)),502
+
+
+@app.post("/api/admin/update/download")
+def update_download():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import UpdateError,download_file,load_state,public_state,save_state,stage_update
+    state=load_state(APP_DIR); checked=state.get("last_check") or {}; manifest=checked.get("manifest") or {}
+    if not checked.get("available") or not checked.get("package_url"): return jsonify(error="Check for an available update first."),400
+    downloads=APP_DIR / "updates" / "downloads"; downloads.mkdir(parents=True,exist_ok=True)
+    archive=downloads / str(manifest.get("asset") or "HomeCloud-v11-update.zip")
+    try:
+        state.update(status="downloading",last_error=""); save_state(APP_DIR,state)
+        digest,size=download_file(str(checked["package_url"]),archive)
+        if digest!=str(manifest.get("sha256","")) or size!=int(manifest.get("size",0)):
+            archive.unlink(missing_ok=True); raise UpdateError("Downloaded update does not match its GitHub release manifest.")
+        staged=stage_update(APP_DIR,archive,manifest)
+        state.update(status="ready",staged=staged,last_error="")
+        save_state(APP_DIR,state)
+        log_activity("update_downloaded",staged["version"],f"Verified and staged {staged['files']} application files.")
+        return jsonify(ok=True,**public_state(state))
+    except UpdateError as e:
+        state.update(status="download_failed",last_error=str(e)); save_state(APP_DIR,state)
+        return jsonify(error=str(e)),400
+
+
+@app.post("/api/admin/update/manual")
+def update_manual():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import MAX_UPDATE_BYTES,UpdateError,is_newer,load_state,public_state,save_state,stage_update
+    upload=request.files.get("update_file")
+    if not upload or not upload.filename: return jsonify(error="Choose a Home Cloud update ZIP."),400
+    if not upload.filename.lower().endswith(".zip"): return jsonify(error="The manual update must be a ZIP file."),400
+    downloads=APP_DIR / "updates" / "downloads"; downloads.mkdir(parents=True,exist_ok=True)
+    archive=downloads / "manual-update.zip"; temp=archive.with_suffix(".part"); total=0
+    try:
+        with temp.open("wb") as output:
+            while True:
+                chunk=upload.stream.read(1024*1024)
+                if not chunk: break
+                total+=len(chunk)
+                if total>MAX_UPDATE_BYTES: raise UpdateError("Update package exceeds the 512 MB safety limit.")
+                output.write(chunk)
+        os.replace(temp,archive)
+        staged=stage_update(APP_DIR,archive)
+        if not is_newer(staged["version"],APP_VERSION):
+            shutil.rmtree(staged["stage"],ignore_errors=True)
+            raise UpdateError("Manual update must be newer than the installed version.")
+        state=load_state(APP_DIR); state.update(status="ready",staged=staged,last_error="",manual=True); save_state(APP_DIR,state)
+        log_activity("update_uploaded",staged["version"],f"Verified and staged {staged['files']} application files.")
+        return jsonify(ok=True,**public_state(state))
+    except (UpdateError,OSError) as e:
+        temp.unlink(missing_ok=True)
+        return jsonify(error=str(e)),400
+
+
+@app.post("/api/admin/update/install")
+def update_install():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import load_state,save_state
+    state=load_state(APP_DIR); staged=state.get("staged") or {}; stage=Path(str(staged.get("stage") or ""))
+    try:
+        stage.resolve().relative_to((APP_DIR/"updates"/"staged").resolve())
+    except (ValueError,OSError): return jsonify(error="No verified update is ready to install."),400
+    if not (stage/"update-package.json").is_file(): return jsonify(error="The staged update is missing. Download it again."),400
+    state.update(status="installing",last_error="",install_started_at=time.time()); save_state(APP_DIR,state)
+    log_activity("update_installing",str(staged.get("version") or "Update"),"Application backup and restart started.")
+    try: _start_update_runner(stage=stage)
+    except Exception as e:
+        state.update(status="install_failed",last_error=str(e)); save_state(APP_DIR,state)
+        return jsonify(error=f"Could not start update helper: {e}"),500
+    return jsonify(ok=True,restarting=True,message="Update is being applied. Home Cloud will restart automatically."),202
+
+
+@app.post("/api/admin/update/rollback")
+def update_rollback():
+    guard=_update_admin_guard()
+    if guard: return guard
+    from homecloud_updater import list_backups,load_state,save_state
+    backup_id=str((request.get_json(silent=True) or {}).get("backup_id") or "")
+    allowed={item["id"] for item in list_backups(APP_DIR)}
+    if backup_id not in allowed: return jsonify(error="That update backup is not available."),404
+    backup=APP_DIR/"backups"/backup_id
+    state=load_state(APP_DIR); state.update(status="rolling_back",last_error=""); save_state(APP_DIR,state)
+    log_activity("update_rollback",backup_id,"Rollback and restart started.")
+    try: _start_update_runner(rollback=backup)
+    except Exception as e:
+        state.update(status="rollback_failed",last_error=str(e)); save_state(APP_DIR,state)
+        return jsonify(error=f"Could not start rollback helper: {e}"),500
+    return jsonify(ok=True,restarting=True,message="Rollback is being applied. Home Cloud will restart automatically."),202
 
 @app.get("/api/status")
 def status():

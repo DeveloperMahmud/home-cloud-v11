@@ -13,6 +13,8 @@ deployment-state*.json
 thumbnails/
 media_cache/
 __pycache__/
+updates/
+backups/update-*/
 *.py[cod]
 *.log
 

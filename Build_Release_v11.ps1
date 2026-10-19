@@ -16,12 +16,12 @@ if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $files = @(
-    'app.py','serve.py','backup_local.py','README.md','.gitignore','config.example.json',
+    'app.py','serve.py','homecloud_updater.py','apply_update.py','backup_local.py','README.md','.gitignore','config.example.json',
     'requirements.txt','requirements.lock.txt','requirements-ai.txt','requirements-ai.lock.txt',
     'HomeCloud_Start.cmd','HomeCloud_Backup.cmd','Create_Daily_Backup_Task.cmd','Remove_Daily_Backup_Task.cmd',
     'Install_HomeCloud_v11.cmd','Install_HomeCloud_v11.ps1','Install_HomeCloud_v11_Offline.cmd','Install_HomeCloud_v11_Online.cmd',
     'Prepare_Offline_Package_v11.ps1','Build_Installer_Packages_v11.ps1','Configure_HomeCloud_Firewall_v11.cmd','Configure_HomeCloud_Firewall_v11.ps1',
-    'Verify_Release_v11.ps1','Build_Release_v11.ps1','V11_RELEASE_NOTES.md'
+    'Verify_Release_v11.ps1','Build_Release_v11.ps1','Build_Update_Package_v11.ps1','V11_RELEASE_NOTES.md'
 )
 foreach ($name in $files) {
     $source = Join-Path $root $name
