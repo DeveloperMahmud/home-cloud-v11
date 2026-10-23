@@ -56,6 +56,15 @@ def run():
         assert (share_folder / "hello.txt").read_bytes() == b"hello phone"
         assert (share_folder / "hello (2).txt").read_bytes() == b"second"
 
+        admin_files = admin.get(f"/api/admin/temp-shares/{channel_id}/files")
+        assert admin_files.status_code == 200
+        admin_payload = admin_files.get_json()
+        assert {item["name"] for item in admin_payload["files"]} == {"hello.txt", "hello (2).txt"}
+        assert admin_payload["channel"]["directory"] == str(share_folder)
+        assert admin_payload["channel"]["in_library"] is False
+        listed = admin.get("/api/admin/temp-shares").get_json()
+        assert listed["library_inbox"] == str((library / "Quick Share Inbox").resolve())
+
         state = phone.get(f"/share/{token}/state").get_json()
         assert len(state["files"]) == 2
         download_url = next(item["download_url"] for item in state["files"] if item["name"] == "hello.txt")

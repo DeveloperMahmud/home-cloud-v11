@@ -814,7 +814,34 @@ def temp_share_public_data(channel, include_token=False):
         data["url"] = f"{guest_base_url()}/share/{channel['token']}"
         data["token"] = channel["token"]
         data["directory"] = channel["directory"]
+        try:
+            library_path = str(Path(channel["directory"]).resolve().relative_to(ROOT.resolve())).replace("\\", "/")
+            data["in_library"] = True
+            data["library_path"] = library_path
+        except (ValueError, OSError):
+            data["in_library"] = False
+            data["library_path"] = ""
     return data
+
+
+def temp_share_files(channel, download_prefix, limit=500):
+    root = temp_share_safe_path(channel)
+    files = []
+    for base, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in names:
+            if name.startswith(".") or name.endswith(".part"): continue
+            path = Path(base, name)
+            try:
+                relative = str(path.relative_to(root)).replace("\\", "/")
+                stat = path.stat()
+                files.append({"name": name, "path": relative, "size": stat.st_size, "modified": stat.st_mtime,
+                              "download_url": f"{download_prefix}/{quote(relative)}"})
+            except OSError: pass
+            if len(files) >= limit: break
+        if len(files) >= limit: break
+    files.sort(key=lambda item: item["modified"], reverse=True)
+    return files
 
 
 def touch_chat_presence(identity):
@@ -4118,7 +4145,29 @@ def admin_list_temp_shares():
     c = db()
     rows = c.execute("SELECT * FROM temp_share_channels ORDER BY created_at DESC LIMIT 100").fetchall()
     c.close()
-    return jsonify(share_root=str(config_value("temp_share_root") or DEFAULT_SHARE_ROOT), channels=[temp_share_public_data(row, True) for row in rows])
+    return jsonify(share_root=str(config_value("temp_share_root") or DEFAULT_SHARE_ROOT),
+                   library_inbox=str((ROOT / "Quick Share Inbox").resolve()),
+                   channels=[temp_share_public_data(row, True) for row in rows])
+
+
+@app.get("/api/admin/temp-shares/<int:channel_id>/files")
+def admin_temp_share_files(channel_id):
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    c = db(); row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone(); c.close()
+    if not row: return jsonify(error="Share not found."), 404
+    return jsonify(channel=temp_share_public_data(row, True),
+                   files=temp_share_files(row, f"/api/admin/temp-shares/{channel_id}/download"))
+
+
+@app.get("/api/admin/temp-shares/<int:channel_id>/download/<path:relative_path>")
+def admin_temp_share_download(channel_id, relative_path):
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    c = db(); row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone(); c.close()
+    if not row: abort(404)
+    path = temp_share_safe_path(row, relative_path, True)
+    return send_file(path, as_attachment=True, conditional=True, download_name=path.name)
 
 
 @app.post("/api/admin/temp-shares/choose-directory")
@@ -4235,21 +4284,7 @@ def temp_share_state(token):
     if denied: return jsonify(error=denied), 403
     files = []
     if channel["mode"] in {"download", "two_way"}:
-        root = temp_share_safe_path(channel)
-        for base, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for name in names:
-                if name.startswith(".") or name.endswith(".part"): continue
-                path = Path(base, name)
-                try:
-                    relative = str(path.relative_to(root)).replace("\\", "/")
-                    stat = path.stat()
-                    files.append({"name": name, "path": relative, "size": stat.st_size, "modified": stat.st_mtime,
-                                  "download_url": f"/share/{token}/download/{quote(relative)}"})
-                except OSError: pass
-                if len(files) >= 500: break
-            if len(files) >= 500: break
-        files.sort(key=lambda item: item["modified"], reverse=True)
+        files = temp_share_files(channel, f"/share/{token}/download")
     return jsonify(channel=temp_share_public_data(channel), files=files)
 
 
