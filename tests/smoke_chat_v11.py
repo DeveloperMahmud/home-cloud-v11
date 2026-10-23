@@ -27,7 +27,11 @@ def run():
         bob = home_cloud.app.test_client()
         headers = {"X-HomeCloud-Client": "1"}
 
-        assert alice.get("/api/chat/state").get_json()["join_required"] is True
+        automatic = alice.get("/api/chat/state").get_json()
+        assert automatic["join_required"] is False
+        assert automatic["identity"]["type"] == "anonymous"
+        assert automatic["identity"]["name"]
+        assert automatic["identity"]["avatar"]
         assert alice.post("/api/chat/join", json={"name": "Alice"}, headers=headers).status_code == 200
         assert bob.post("/api/chat/join", json={"name": "Bob"}, headers=headers).status_code == 200
 
@@ -61,7 +65,7 @@ def run():
 
         health = alice.get("/api/health").get_json()
         assert health["internet_required"] is False
-        assert health["version"] == "11.0.0-beta.2"
+        assert health["version"] == "11.0.0-beta.3"
         print("Home Cloud v11 LAN chat smoke tests passed.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

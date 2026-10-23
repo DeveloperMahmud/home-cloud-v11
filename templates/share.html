@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Home Cloud · Quick Share</title>
+  <style>
+    *{box-sizing:border-box}html{color-scheme:dark}body{margin:0;min-height:100vh;background:radial-gradient(circle at 10% 0,#19302a 0,transparent 36%),#090d11;color:#eef3f6;font-family:Inter,Segoe UI,Arial,sans-serif;padding:22px}.wrap{width:min(760px,100%);margin:auto}.brand{display:flex;align-items:center;gap:11px;margin:7px 0 24px}.logo{width:42px;height:42px;border-radius:13px;background:#43dda0;color:#07150f;display:grid;place-items:center;font-weight:900}.brand strong{display:block}.brand small,.muted{color:#81909c}.card{background:#10161ceF;border:1px solid #26313a;border-radius:22px;padding:clamp(18px,4vw,30px);box-shadow:0 30px 80px #0006}.head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start}.head h1{font-size:clamp(24px,7vw,38px);margin:0 0 8px;letter-spacing:-1px}.pill{white-space:nowrap;background:#143126;color:#72e8b3;border:1px solid #23523f;border-radius:999px;padding:7px 10px;font-size:11px}.drop{margin-top:22px;border:1px dashed #40505b;border-radius:17px;padding:28px 18px;text-align:center;background:#0b1015;transition:.2s}.drop.drag{border-color:#43dda0;background:#10251d}.drop input{display:none}.drop button{margin-top:12px;border:0;border-radius:11px;background:#43dda0;color:#07150f;font-weight:750;padding:11px 16px}.progress{height:8px;background:#202932;border-radius:999px;overflow:hidden;margin-top:17px}.bar{height:100%;width:0;background:#43dda0;transition:width .12s}.status{font-size:12px;color:#9aa7b2;margin-top:9px;min-height:18px}.files{margin-top:24px}.files h2{font-size:14px}.file{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #222c34}.fileIcon{width:37px;height:37px;border-radius:10px;background:#1b252d;display:grid;place-items:center}.fileInfo{min-width:0;flex:1}.fileName{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.fileMeta{font-size:10px;color:#778590;margin-top:4px}.file a{color:#09110d;text-decoration:none;background:#dce7e2;border-radius:9px;padding:8px 10px;font-size:11px}.events{margin-top:22px;padding-top:16px;border-top:1px solid #222c34;font-size:11px;color:#81909c}.event{display:flex;justify-content:space-between;gap:10px;padding:5px 0}.error{background:#32181d;border:1px solid #6c303b;color:#ffb6c0;border-radius:14px;padding:15px}.hidden{display:none!important}.foot{text-align:center;color:#5f6d78;font-size:10px;padding:20px}@media(max-width:520px){body{padding:12px}.card{border-radius:17px}.head{display:block}.pill{display:inline-block;margin-top:8px}.drop{padding:24px 12px}.file a{padding:8px}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <div class="brand"><div class="logo">HC</div><div><strong>Home Cloud Quick Share</strong><small>Private LAN transfer · no account needed</small></div></div>
+  <section class="card">
+    <div id="error" class="error {% if not initial_error %}hidden{% endif %}">{{ initial_error }}</div>
+    <div id="content" class="{% if initial_error %}hidden{% endif %}">
+      <div class="head"><div><h1 id="title">Opening share…</h1><div id="summary" class="muted">Checking the local channel</div></div><div id="timer" class="pill">Active</div></div>
+      <div id="uploadBox" class="drop hidden"><strong>Send files to this Home Cloud</strong><div class="muted" style="font-size:11px;margin-top:6px">Drop files here or select them from your phone.</div><input id="picker" type="file" multiple><button onclick="document.getElementById('picker').click()">Choose files</button></div>
+      <div id="progressWrap" class="hidden"><div class="progress"><div id="bar" class="bar"></div></div><div id="status" class="status"></div></div>
+      <div id="filesBox" class="files hidden"><h2>Available files</h2><div id="files"></div></div>
+      <div id="events" class="events"></div>
+    </div>
+  </section>
+  <div class="foot">Files stay on the host computer · Internet is not used</div>
+</main>
+<script>
+const TOKEN={{ token|tojson }},$=id=>document.getElementById(id);let state=null,timer=null;
+const bytes=n=>{n=Number(n)||0;for(const u of ['B','KB','MB','GB']){if(n<1024||u==='GB')return (n<10&&u!=='B'?n.toFixed(1):Math.round(n))+' '+u;n/=1024}};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function fail(message){$('content').classList.add('hidden');$('error').textContent=message;$('error').classList.remove('hidden')}
+function render(d){state=d.channel;$('title').textContent=state.name;$('summary').textContent=state.mode==='upload'?'Upload-only drop box':state.mode==='download'?'Download collection':'Send and receive files';$('uploadBox').classList.toggle('hidden',!['upload','two_way'].includes(state.mode));$('filesBox').classList.toggle('hidden',!['download','two_way'].includes(state.mode));$('files').innerHTML=(d.files||[]).length?(d.files||[]).map(f=>`<div class="file"><div class="fileIcon">⇩</div><div class="fileInfo"><div class="fileName">${esc(f.path)}</div><div class="fileMeta">${bytes(f.size)}</div></div><a href="${f.download_url}">Download</a></div>`).join(''):'<div class="muted" style="font-size:11px">No files are available yet.</div>';let ev=state.events||[];$('events').innerHTML=ev.length?'<strong>Recent activity</strong>'+ev.slice(0,8).map(x=>`<div class="event"><span>${esc(x.event_type)} · ${esc(x.filename)}</span><span>${bytes(x.size)}</span></div>`).join(''):'';tick()}
+function tick(){if(!state)return;let left=Math.max(0,Math.floor(Number(state.expires_at)-Date.now()/1000)),h=Math.floor(left/3600),m=Math.floor(left%3600/60),s=left%60;$('timer').textContent=left?(h?h+'h '+m+'m':m+'m '+s+'s'):'Expired';if(!left)fail('This share has expired.')}
+async function refresh(){if(!TOKEN)return;try{let r=await fetch(`/share/${TOKEN}/state`),d=await r.json();if(!r.ok)throw Error(d.error||'Share unavailable');render(d)}catch(e){fail(e.message)}}
+function upload(files){files=[...files];if(!files.length)return;let fd=new FormData();files.forEach(f=>fd.append('files',f,f.name));let xhr=new XMLHttpRequest();$('progressWrap').classList.remove('hidden');$('bar').style.width='0%';$('status').textContent=`Preparing ${files.length} file(s)…`;xhr.open('POST',`/share/${TOKEN}/upload`);xhr.upload.onprogress=e=>{if(!e.lengthComputable)return;let p=Math.round(e.loaded/e.total*100);$('bar').style.width=p+'%';$('status').textContent=`${p}% · ${bytes(e.loaded)} / ${bytes(e.total)}`};xhr.onerror=()=>{$('status').textContent='Upload interrupted. Check the LAN connection and try again.'};xhr.onload=()=>{let d={};try{d=JSON.parse(xhr.responseText||'{}')}catch(e){}if(xhr.status<200||xhr.status>=300){$('status').textContent=d.error||(d.failed?.[0]?.error)||'Upload failed';return}$('bar').style.width='100%';$('status').textContent=`${d.uploaded?.length||0} file(s) received safely.`;$('picker').value='';refresh()};xhr.send(fd)}
+$('picker')?.addEventListener('change',e=>upload(e.target.files));let drop=$('uploadBox');['dragenter','dragover'].forEach(n=>drop?.addEventListener(n,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(n=>drop?.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('drag')}));drop?.addEventListener('drop',e=>upload(e.dataTransfer.files));refresh();timer=setInterval(tick,1000);setInterval(refresh,15000);
+</script>
+</body></html>

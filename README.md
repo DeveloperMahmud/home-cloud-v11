@@ -4,7 +4,19 @@ Home Cloud is a local-first visual asset library and file-transfer server for a 
 
 ## What works offline
 
-After dependencies are installed, file browsing, upload/download, folders, copy/move, metadata search, thumbnails, custom image/video viewing, users, guest links, dashboard, backups, diagnostics and text-only LAN chat work without internet access. Unsupported MOV/HEVC videos can be converted locally into a browser-compatible H.264 cache; originals are never modified. Runtime LAN detection uses local host information only, and public-IP geolocation is disabled.
+After dependencies are installed, file browsing, upload/download, folders, copy/move, metadata search, thumbnails, custom image/video viewing, Home OTT / Media Hub, users, guest links, QR Quick Share, dashboard, backups, diagnostics and text-only LAN chat work without internet access. Unsupported MOV/HEVC videos can be converted locally into a browser-compatible H.264 cache; originals are never modified. Runtime LAN detection uses local host information only, and public-IP geolocation is disabled.
+
+## Floating LAN Chat and QR Quick Share
+
+LAN Chat starts as a small floating chat head instead of occupying the workspace. Registered users keep their account name; anonymous LAN visitors receive a private random name and avatar automatically, so typing a name is optional. Messages remain text-only and are stored in the local SQLite database.
+
+Administrators can open the floating **Quick Share** button, choose a separate PC folder, select upload-only, download-only, or two-way mode, and set expiry, per-file, total-transfer, and device limits. Home Cloud produces a QR code and temporary LAN link that a phone can open without an account. Incoming files are staged and atomically completed, duplicate names are preserved with a numbered suffix, activity is visible to the administrator, and revoke takes effect immediately. Quick Share does not expose the main asset library unless the administrator explicitly selects that folder.
+
+## Home OTT / Media Hub
+
+Administrators can open **Media Hub -> Manage library** and publish selected indexed videos into a private OTT-style catalogue. Media Hub includes featured content, Movies, Series, categories, Recently Added, per-user Continue Watching and Watchlist rows. Video files stay in the configured asset library; catalogue removal never deletes the original.
+
+Series filenames such as `Show.Name.S01E02.Title.mkv` are grouped automatically and metadata remains editable locally. Posters are extracted by the bundled/local FFmpeg runtime. Direct Play uses HTTP Range requests for fast seeking and concurrent LAN viewing; unsupported formats can use the existing local H.264 compatibility cache. Sidecar subtitles named like `Movie.en.srt` or `Movie.bn.vtt` are discovered automatically. Watch progress, favorites and metadata stay in SQLite on the host PC.
 
 Standard mode is the recommended lightweight setup. Full AI mode adds OpenCLIP semantic image search. Full AI packages and model weights must be prepared once on an internet-connected build PC or already exist in the local offline bundle. OCR is local and optional; install Tesseract separately if OCR is required.
 
@@ -77,6 +89,8 @@ Database migrations run automatically and retain existing users, assets, embeddi
 
 ### Small GitHub Release updates
 
+For the complete public release-only repository workflow, Bengali web/CLI instructions, auto-update setup and troubleshooting, see [`GITHUB_RELEASE_AUTO_UPDATE_GUIDE_BN.md`](GITHUB_RELEASE_AUTO_UPDATE_GUIDE_BN.md).
+
 After the first v11 installation, an administrator can open **Settings → Update Center** and select Stable or Beta. The official `DeveloperMahmud/home-cloud-v11` repository is preconfigured and can be changed there if the project is forked. Checking/downloading an update is the only part that needs internet; file browsing, transfer, search, viewers, users and LAN Chat remain fully offline.
 
 For each new version, change the application version and build these two small release assets:
@@ -101,6 +115,8 @@ Run the automated checks:
 python tests\smoke_v101.py
 python tests\smoke_chat_v11.py
 python tests\smoke_v11_features.py
+python tests\smoke_media_hub_v11.py
+python tests\smoke_temp_share_v11.py
 python tests\smoke_release_v11.py
 python tests\smoke_updater_v11.py
 powershell -ExecutionPolicy Bypass -File .\Verify_Release_v11.ps1
@@ -116,4 +132,4 @@ Use `-IncludeOfflinePayload` only after preparing an offline wheelhouse. Offline
 
 ## Security scope
 
-Home Cloud is intended for a trusted private LAN. It binds to the host network so other local devices can connect. Do not expose its port directly to the public internet. Use strong account passwords and keep guest links short-lived.
+Home Cloud is intended for a trusted private LAN. It binds to the host network so other local devices can connect. Do not expose its port directly to the public internet. Use strong account passwords and keep guest and Quick Share links short-lived. A Quick Share QR/link is a temporary bearer credential: anyone on the LAN who has it can use the channel until it expires or is revoked.

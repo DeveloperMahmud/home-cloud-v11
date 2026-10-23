@@ -1,5 +1,20 @@
 # Home Cloud v11 Preview
 
+## Beta 3 - Home OTT / Media Hub
+
+- Added an offline-first Media Hub that presents admin-selected local videos in an OTT-style interface without copying or changing original files.
+- Added featured titles, Movies, Series, categories, Recently Added, per-user Continue Watching and Watchlist rows.
+- Added automatic `S01E02` filename detection, editable local metadata, series/season/episode grouping and next-episode autoplay.
+- Added local FFmpeg poster generation, custom responsive playback, Direct Play/HTTP Range delivery and the existing browser-compatibility cache fallback.
+- Added per-user resume positions and watched state plus automatic sidecar `.srt`/`.vtt` subtitle discovery and local SRT-to-WebVTT delivery.
+- Added an admin catalogue manager for adding/removing indexed videos, editing metadata and choosing the featured title. Removing a title never deletes its video.
+- Added keyboard focus treatment and responsive layouts validated at desktop, phone and TV-sized viewports.
+- Added Media Hub database migrations and isolated regression coverage; existing databases upgrade automatically.
+- Changed LAN Chat to a default-collapsed floating chat head with unread count, automatic anonymous random names, and generated avatars; visitors no longer have to type a name.
+- Added admin-created QR Quick Share channels with a separately selected folder, upload/download/two-way modes, expiry, file/total quotas, device limits, activity, extension, and immediate revoke.
+- Added a mobile-first, no-login LAN transfer page with upload progress, safe duplicate naming, atomic file completion, and direct downloads.
+- Added automatic SQLite migrations and isolated regression coverage for temporary shares; no cloud service or internet connection is used.
+
 ## Beta 2 — local-first update system and media polish
 
 - Added an Admin Update Center with configurable GitHub repository and Stable/Beta channels.
@@ -28,7 +43,8 @@ Home Cloud v11 remains a local-first LAN application. Original assets, thumbnail
 ## Highlights
 
 - Responsive sidebar workspace and mobile navigation.
-- Text-only LAN Chat for registered, guest, and optional anonymous users.
+- Floating text-only LAN Chat for registered, guest, and optional auto-named anonymous users.
+- Expiring QR Quick Share channels for account-free phone-to-PC and PC-to-phone LAN transfer.
 - Chat access policy, retention, moderation, unread badge, and sound preference.
 - Advanced asset filters for extension, folder, date, and size plus local recent searches.
 - Upload retry, conflict handling, folder uploads, visual copy/move destination picker, and recycle bin.

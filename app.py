@@ -4,7 +4,7 @@
 #
 import os, sqlite3, hashlib, json, threading, warnings, time, sys, subprocess, shutil, gc, secrets, mimetypes
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template, send_file, abort, session, redirect, url_for, after_this_request
+from flask import Flask, request, jsonify, render_template, send_file, abort, session, redirect, url_for, after_this_request, Response
 import socket
 import uuid
 import re
@@ -17,6 +17,7 @@ MEDIA_CACHE = APP_DIR / "media_cache"
 CONFIG = APP_DIR / "config.json"
 SECRET_FILE = APP_DIR / "secret.key"
 DEFAULT_ROOT = str(Path.home() / "Documents" / "Home Cloud Library")
+DEFAULT_SHARE_ROOT = str(Path.home() / "Documents" / "Home Cloud Shares")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
 VIDEO_EXTS = ['.3gp', '.avi', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.ogv', '.webm']
 AUDIO_EXTS = ['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.wma']
@@ -51,7 +52,7 @@ LEXICAL_CANDIDATE_LIMIT = 1000
 AI_SEARCH_CANDIDATE_LIMIT = 10000
 MAX_HEAVY_JOBS = 1
 PERF_BATCH_PAUSE = 0.01
-APP_VERSION = "11.0.0-beta.2"
+APP_VERSION = "11.0.0-beta.3"
 SERVER_STARTED_AT = time.time()
 LOGIN_RATE_WINDOW = 300
 LOGIN_RATE_MAX_FAILURES = 8
@@ -208,6 +209,7 @@ CONFIG_DEFAULTS = {
     "chat_allow_anonymous": True,
     "chat_allow_guests": True,
     "chat_retention_days": 30,
+    "temp_share_root": DEFAULT_SHARE_ROOT,
     "thumbnail_quality": 85,
     "update_repo": "DeveloperMahmud/home-cloud-v11",
     "update_channel": "beta",
@@ -424,6 +426,74 @@ def init_db():
         ip TEXT NOT NULL DEFAULT ''
     )""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_chat_presence_seen ON chat_presence(last_seen DESC)")
+    c.execute("""CREATE TABLE IF NOT EXISTS temp_share_channels(
+        id INTEGER PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'upload',
+        directory TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        max_file_bytes INTEGER NOT NULL DEFAULT 1073741824,
+        max_total_bytes INTEGER NOT NULL DEFAULT 5368709120,
+        max_devices INTEGER NOT NULL DEFAULT 10,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL,
+        created_by INTEGER,
+        uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+        transfer_count INTEGER NOT NULL DEFAULT 0
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_temp_share_expiry ON temp_share_channels(active,expires_at DESC)")
+    c.execute("""CREATE TABLE IF NOT EXISTS temp_share_devices(
+        channel_id INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        first_seen REAL NOT NULL,
+        last_seen REAL NOT NULL,
+        PRIMARY KEY(channel_id,ip)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS temp_share_events(
+        id INTEGER PRIMARY KEY,
+        channel_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        filename TEXT NOT NULL DEFAULT '',
+        size INTEGER NOT NULL DEFAULT 0,
+        ip TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_temp_share_events ON temp_share_events(channel_id,created_at DESC)")
+    # Home OTT / Media Hub. Only references indexed assets; original media is
+    # never copied, renamed or modified by the catalogue.
+    c.execute("""CREATE TABLE IF NOT EXISTS media_hub_items(
+        asset_id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'Movies',
+        media_kind TEXT NOT NULL DEFAULT 'movie',
+        series_title TEXT NOT NULL DEFAULT '',
+        season INTEGER NOT NULL DEFAULT 0,
+        episode INTEGER NOT NULL DEFAULT 0,
+        featured INTEGER NOT NULL DEFAULT 0,
+        poster TEXT NOT NULL DEFAULT '',
+        added_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_media_hub_added ON media_hub_items(added_at DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_media_hub_series ON media_hub_items(series_title,season,episode)")
+    c.execute("""CREATE TABLE IF NOT EXISTS media_hub_progress(
+        viewer_key TEXT NOT NULL,
+        asset_id INTEGER NOT NULL,
+        position REAL NOT NULL DEFAULT 0,
+        duration REAL NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(viewer_key,asset_id),
+        FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_media_hub_progress_viewer ON media_hub_progress(viewer_key,updated_at DESC)")
+    c.execute("""CREATE TABLE IF NOT EXISTS media_hub_watchlist(
+        viewer_key TEXT NOT NULL,
+        asset_id INTEGER NOT NULL,
+        added_at REAL NOT NULL,
+        PRIMARY KEY(viewer_key,asset_id),
+        FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_assets_ext ON assets(ext)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_assets_mtime ON assets(mtime DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name COLLATE NOCASE)")
@@ -646,6 +716,105 @@ def chat_identity():
     if anon_name and anon_key:
         return {"type": "anonymous", "key": f"anon:{anon_key}", "name": anon_name, "admin": False}
     return None
+
+
+_CHAT_ADJECTIVES = ("Amber", "Blue", "Calm", "Coral", "Cosmic", "Green", "Happy", "Ivory", "Lucky", "Silver", "Sunny", "Velvet")
+_CHAT_ANIMALS = ("Badger", "Falcon", "Fox", "Koala", "Otter", "Owl", "Panda", "Robin", "Tiger", "Turtle", "Wolf", "Yak")
+_CHAT_AVATARS = ("🦊", "🐼", "🦉", "🐯", "🐨", "🦦", "🐢", "🐺", "🦅", "🐦")
+
+
+def ensure_anonymous_chat_identity():
+    """Create a stable, friendly identity for this browser session."""
+    identity = chat_identity()
+    if identity:
+        return identity
+    session["chat_name"] = f"{secrets.choice(_CHAT_ADJECTIVES)} {secrets.choice(_CHAT_ANIMALS)} {secrets.randbelow(900) + 100}"
+    session["chat_session_id"] = uuid.uuid4().hex
+    session["chat_avatar"] = secrets.choice(_CHAT_AVATARS)
+    return chat_identity()
+
+
+def chat_avatar(identity):
+    if identity["type"] == "admin":
+        return "★"
+    if identity["type"] == "guest":
+        return "◇"
+    if identity["type"] == "anonymous":
+        digest = hashlib.sha256(str(identity["name"]).encode("utf-8", "ignore")).digest()
+        return _CHAT_AVATARS[digest[0] % len(_CHAT_AVATARS)]
+    return "●"
+
+
+def chat_avatar_for_message(sender_type, display_name):
+    if sender_type == "admin": return "★"
+    if sender_type == "guest": return "◇"
+    digest = hashlib.sha256(str(display_name).encode("utf-8", "ignore")).digest()
+    return _CHAT_AVATARS[digest[0] % len(_CHAT_AVATARS)] if sender_type == "anonymous" else "●"
+
+
+def temp_share_channel(token, allow_expired=False):
+    c = db()
+    row = c.execute("SELECT * FROM temp_share_channels WHERE token=?", (str(token or ""),)).fetchone()
+    c.close()
+    if not row or not row["active"]:
+        return None
+    if not allow_expired and float(row["expires_at"]) < time.time():
+        return None
+    return row
+
+
+def temp_share_access(channel):
+    """Register one LAN device and enforce the channel's device limit."""
+    if not is_lan_request():
+        return "This share is available only on the local network."
+    ip = client_ip() or request.remote_addr or "unknown"
+    now = time.time()
+    c = db()
+    known = c.execute("SELECT 1 FROM temp_share_devices WHERE channel_id=? AND ip=?", (channel["id"], ip)).fetchone()
+    count = c.execute("SELECT COUNT(*) FROM temp_share_devices WHERE channel_id=?", (channel["id"],)).fetchone()[0]
+    if not known and count >= int(channel["max_devices"]):
+        c.close()
+        return "This share has reached its device limit."
+    c.execute("""INSERT INTO temp_share_devices(channel_id,ip,first_seen,last_seen) VALUES(?,?,?,?)
+                 ON CONFLICT(channel_id,ip) DO UPDATE SET last_seen=excluded.last_seen""",
+              (channel["id"], ip, now, now))
+    c.commit(); c.close()
+    return None
+
+
+def temp_share_safe_path(channel, relative_path="", must_file=False):
+    root = Path(channel["directory"]).expanduser().resolve()
+    raw = str(relative_path or "").replace("\\", "/").strip("/")
+    target = (root / raw).resolve() if raw else root
+    try:
+        target.relative_to(root)
+    except ValueError:
+        abort(403)
+    if must_file and not target.is_file():
+        abort(404)
+    return target
+
+
+def temp_share_public_data(channel, include_token=False):
+    now = time.time()
+    c = db()
+    devices = c.execute("SELECT COUNT(*) FROM temp_share_devices WHERE channel_id=?", (channel["id"],)).fetchone()[0]
+    events = c.execute("SELECT event_type,filename,size,ip,created_at FROM temp_share_events WHERE channel_id=? ORDER BY id DESC LIMIT 20", (channel["id"],)).fetchall()
+    c.close()
+    event_items = [dict(x) for x in events]
+    if not include_token:
+        for item in event_items: item.pop("ip", None)
+    data = {"id": channel["id"], "name": channel["name"], "mode": channel["mode"],
+            "expires_at": channel["expires_at"], "seconds_left": max(0, int(channel["expires_at"] - now)),
+            "max_file_bytes": channel["max_file_bytes"], "max_total_bytes": channel["max_total_bytes"],
+            "uploaded_bytes": channel["uploaded_bytes"], "transfer_count": channel["transfer_count"],
+            "devices": devices, "max_devices": channel["max_devices"], "active": bool(channel["active"]),
+            "events": event_items}
+    if include_token:
+        data["url"] = f"{guest_base_url()}/share/{channel['token']}"
+        data["token"] = channel["token"]
+        data["directory"] = channel["directory"]
+    return data
 
 
 def touch_chat_presence(identity):
@@ -3796,20 +3965,24 @@ def chat_join():
         identity = chat_identity()
         if identity:
             touch_chat_presence(identity)
-            return jsonify(ok=True, identity=identity)
+            return jsonify(ok=True, identity={**identity, "avatar": chat_avatar(identity)})
     if not config_value("chat_allow_anonymous"):
         return jsonify(error="Anonymous chat access is disabled. Sign in to continue."),403
     data = request.get_json(silent=True) or {}
     name = re.sub(r"\s+", " ", str(data.get("name") or "").strip())
+    if not name:
+        identity = ensure_anonymous_chat_identity()
+        touch_chat_presence(identity)
+        return jsonify(ok=True, identity={**identity, "avatar": chat_avatar(identity)})
     if not 2 <= len(name) <= 30:
-        return jsonify(error="Enter a chat name between 2 and 30 characters."), 400
+        return jsonify(error="Enter a chat name between 2 and 30 characters, or leave it blank for a random name."), 400
     if any(ord(ch) < 32 for ch in name) or name.casefold() in {"admin", "administrator", "system", "home cloud", "guest"}:
         return jsonify(error="Choose a different chat name."), 400
     session["chat_name"] = name
     session["chat_session_id"] = session.get("chat_session_id") or uuid.uuid4().hex
     identity = chat_identity()
     touch_chat_presence(identity)
-    return jsonify(ok=True, identity=identity)
+    return jsonify(ok=True, identity={**identity, "avatar": chat_avatar(identity)})
 
 
 @app.get("/api/chat/state")
@@ -3824,7 +3997,7 @@ def chat_state():
         return jsonify(error="Anonymous chat access is disabled. Sign in to continue."),403
     identity = chat_identity()
     if not identity:
-        return jsonify(join_required=True, messages=[], participants=[])
+        identity = ensure_anonymous_chat_identity()
     touch_chat_presence(identity)
     try:
         after_id = max(0, int(request.args.get("after", 0)))
@@ -3848,9 +4021,10 @@ def chat_state():
         item = dict(row)
         item["mine"] = item["sender_key"] == identity["key"]
         item["can_delete"] = bool(identity["admin"] or item["mine"])
+        item["avatar"] = chat_avatar_for_message(item["sender_type"], item["display_name"])
         item.pop("sender_key", None)
         messages.append(item)
-    return jsonify(identity=identity, messages=messages, participants=[dict(row) for row in participants], server_time=time.time())
+    return jsonify(identity={**identity, "avatar": chat_avatar(identity)}, join_required=False, messages=messages, participants=[dict(row) for row in participants], server_time=time.time())
 
 
 @app.post("/api/chat/messages")
@@ -3935,6 +4109,196 @@ def admin_clear_chat_messages():
     c=db(); cur=c.execute("DELETE FROM chat_messages"); deleted=cur.rowcount; c.execute("DELETE FROM chat_presence"); c.commit(); c.close()
     log_activity("chat_history_cleared","LAN Chat",f"Deleted {deleted} message(s).")
     return jsonify(ok=True,deleted=deleted)
+
+
+@app.get("/api/admin/temp-shares")
+def admin_list_temp_shares():
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    c = db()
+    rows = c.execute("SELECT * FROM temp_share_channels ORDER BY created_at DESC LIMIT 100").fetchall()
+    c.close()
+    return jsonify(share_root=str(config_value("temp_share_root") or DEFAULT_SHARE_ROOT), channels=[temp_share_public_data(row, True) for row in rows])
+
+
+@app.post("/api/admin/temp-shares/choose-directory")
+def admin_choose_temp_share_directory():
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    try:
+        initial = str(config_value("temp_share_root") or DEFAULT_SHARE_ROOT)
+        Path(initial).expanduser().mkdir(parents=True, exist_ok=True)
+        selected = choose_folder_native(initial)
+        if not selected: return jsonify(cancelled=True)
+        selected_path = Path(selected).expanduser().resolve()
+        if not selected_path.is_dir(): return jsonify(error="Selected share folder does not exist."), 400
+        save_config_values({"temp_share_root": str(selected_path)})
+        return jsonify(cancelled=False, directory=str(selected_path))
+    except Exception as exc:
+        return jsonify(error=str(exc)), 500
+
+
+@app.post("/api/admin/temp-shares")
+def admin_create_temp_share():
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    data = request.get_json(silent=True) or {}
+    name = re.sub(r"\s+", " ", str(data.get("name") or "Quick Share").strip())[:80] or "Quick Share"
+    mode = str(data.get("mode") or "upload").lower()
+    if mode not in {"upload", "download", "two_way"}: return jsonify(error="Invalid share mode."), 400
+    try:
+        minutes = max(5, min(int(data.get("minutes", 60)), 10080))
+        max_file_bytes = max(1024 * 1024, min(int(float(data.get("max_file_mb", 1024)) * 1024 * 1024), 10 * 1024**3))
+        max_total_bytes = max(max_file_bytes, min(int(float(data.get("max_total_mb", 5120)) * 1024 * 1024), 50 * 1024**3))
+        max_devices = max(1, min(int(data.get("max_devices", 10)), 100))
+    except (TypeError, ValueError):
+        return jsonify(error="Expiry and transfer limits must be valid numbers."), 400
+    directory = Path(str(data.get("directory") or config_value("temp_share_root") or DEFAULT_SHARE_ROOT)).expanduser().resolve()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return jsonify(error=f"Share folder could not be created: {exc}"), 400
+    if not directory.is_dir(): return jsonify(error="Choose a valid share folder."), 400
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    c = db()
+    cur = c.execute("""INSERT INTO temp_share_channels(token,name,mode,directory,expires_at,max_file_bytes,max_total_bytes,max_devices,created_at,created_by)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (token, name, mode, str(directory), now + minutes * 60, max_file_bytes, max_total_bytes, max_devices, now, user["id"]))
+    channel_id = cur.lastrowid
+    c.commit()
+    row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone()
+    c.close()
+    save_config_values({"temp_share_root": str(directory)})
+    log_activity("temp_share_created", name, f"Mode {mode}; expires in {minutes} minutes; folder {directory}")
+    return jsonify(ok=True, channel=temp_share_public_data(row, True))
+
+
+@app.post("/api/admin/temp-shares/<int:channel_id>/extend")
+def admin_extend_temp_share(channel_id):
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    data = request.get_json(silent=True) or {}
+    try: minutes = max(5, min(int(data.get("minutes", 60)), 10080))
+    except (TypeError, ValueError): return jsonify(error="Invalid extension."), 400
+    c = db()
+    row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone()
+    if not row: c.close(); return jsonify(error="Share not found."), 404
+    expires_at = max(time.time(), float(row["expires_at"])) + minutes * 60
+    c.execute("UPDATE temp_share_channels SET expires_at=?,active=1 WHERE id=?", (expires_at, channel_id)); c.commit()
+    row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone(); c.close()
+    log_activity("temp_share_extended", row["name"], f"Extended by {minutes} minutes.")
+    return jsonify(ok=True, channel=temp_share_public_data(row, True))
+
+
+@app.delete("/api/admin/temp-shares/<int:channel_id>")
+def admin_revoke_temp_share(channel_id):
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    c = db(); row = c.execute("SELECT name FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone()
+    if not row: c.close(); return jsonify(error="Share not found."), 404
+    c.execute("UPDATE temp_share_channels SET active=0 WHERE id=?", (channel_id,)); c.commit(); c.close()
+    log_activity("temp_share_revoked", row["name"], "Temporary share link revoked.")
+    return jsonify(ok=True)
+
+
+@app.get("/api/admin/temp-shares/<int:channel_id>/qr")
+def admin_temp_share_qr(channel_id):
+    user = current_user()
+    if not user or user["role"] != "admin": return jsonify(error="Admin only"), 403
+    c = db(); row = c.execute("SELECT * FROM temp_share_channels WHERE id=?", (channel_id,)).fetchone(); c.close()
+    if not row: return jsonify(error="Share not found."), 404
+    try:
+        import io, qrcode
+        output = io.BytesIO()
+        qrcode.make(f"{guest_base_url()}/share/{row['token']}").save(output, format="PNG")
+        output.seek(0)
+        return send_file(output, mimetype="image/png", max_age=0)
+    except Exception as exc:
+        return jsonify(error=f"QR generation is unavailable: {exc}"), 500
+
+
+@app.get("/share/<token>")
+def temp_share_page(token):
+    channel = temp_share_channel(token)
+    if not channel: return render_template("share.html", token="", initial_error="This share link is invalid, revoked, or expired."), 404
+    denied = temp_share_access(channel)
+    if denied: return render_template("share.html", token="", initial_error=denied), 403
+    return render_template("share.html", token=token, initial_error="")
+
+
+@app.get("/share/<token>/state")
+def temp_share_state(token):
+    channel = temp_share_channel(token)
+    if not channel: return jsonify(error="This share link is invalid, revoked, or expired."), 404
+    denied = temp_share_access(channel)
+    if denied: return jsonify(error=denied), 403
+    files = []
+    if channel["mode"] in {"download", "two_way"}:
+        root = temp_share_safe_path(channel)
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in names:
+                if name.startswith(".") or name.endswith(".part"): continue
+                path = Path(base, name)
+                try:
+                    relative = str(path.relative_to(root)).replace("\\", "/")
+                    stat = path.stat()
+                    files.append({"name": name, "path": relative, "size": stat.st_size, "modified": stat.st_mtime,
+                                  "download_url": f"/share/{token}/download/{quote(relative)}"})
+                except OSError: pass
+                if len(files) >= 500: break
+            if len(files) >= 500: break
+        files.sort(key=lambda item: item["modified"], reverse=True)
+    return jsonify(channel=temp_share_public_data(channel), files=files)
+
+
+@app.post("/share/<token>/upload")
+def temp_share_upload(token):
+    channel = temp_share_channel(token)
+    if not channel: return jsonify(error="This share link is invalid, revoked, or expired."), 404
+    denied = temp_share_access(channel)
+    if denied: return jsonify(error=denied), 403
+    if channel["mode"] not in {"upload", "two_way"}: return jsonify(error="Uploads are disabled for this share."), 403
+    uploads = request.files.getlist("files")
+    if not uploads: return jsonify(error="Choose at least one file."), 400
+    root = temp_share_safe_path(channel)
+    saved, failed, batch_bytes = [], [], 0
+    for upload in uploads[:100]:
+        name = valid_new_name(Path(upload.filename or "").name)
+        if not name:
+            failed.append({"name": upload.filename or "", "error": "Invalid filename"}); continue
+        target = root / name
+        if target.exists(): target = available_upload_target(target)
+        partial = root / f".{target.name}.{secrets.token_hex(6)}.part"
+        try:
+            upload.save(partial)
+            size = partial.stat().st_size
+            if size > int(channel["max_file_bytes"]): raise ValueError("File exceeds this share's per-file limit")
+            if int(channel["uploaded_bytes"]) + batch_bytes + size > int(channel["max_total_bytes"]): raise ValueError("Share upload quota exceeded")
+            os.replace(partial, target)
+            saved.append({"name": target.name, "size": size}); batch_bytes += size
+            c = db(); c.execute("INSERT INTO temp_share_events(channel_id,event_type,filename,size,ip,created_at) VALUES(?,?,?,?,?,?)",
+                                (channel["id"], "upload", target.name, size, client_ip(), time.time())); c.commit(); c.close()
+        except Exception as exc:
+            partial.unlink(missing_ok=True)
+            failed.append({"name": name, "error": str(exc)})
+    if batch_bytes:
+        c = db(); c.execute("UPDATE temp_share_channels SET uploaded_bytes=uploaded_bytes+?,transfer_count=transfer_count+? WHERE id=?", (batch_bytes, len(saved), channel["id"])); c.commit(); c.close()
+    return jsonify(ok=bool(saved), uploaded=saved, failed=failed), (200 if saved else 400)
+
+
+@app.get("/share/<token>/download/<path:relative_path>")
+def temp_share_download(token, relative_path):
+    channel = temp_share_channel(token)
+    if not channel: abort(404)
+    denied = temp_share_access(channel)
+    if denied or channel["mode"] not in {"download", "two_way"}: abort(403)
+    path = temp_share_safe_path(channel, relative_path, True)
+    c = db(); c.execute("INSERT INTO temp_share_events(channel_id,event_type,filename,size,ip,created_at) VALUES(?,?,?,?,?,?)",
+                        (channel["id"], "download", path.name, path.stat().st_size, client_ip(), time.time()))
+    c.execute("UPDATE temp_share_channels SET transfer_count=transfer_count+1 WHERE id=?", (channel["id"],)); c.commit(); c.close()
+    return send_file(path, as_attachment=True, conditional=True, download_name=path.name)
 
 
 @app.get("/api/health")
@@ -4031,6 +4395,355 @@ def ffmpeg_executable():
         return candidate if candidate and Path(candidate).is_file() else ""
     except Exception:
         return ""
+
+
+def media_hub_viewer_key():
+    user = current_user()
+    if user:
+        return f"user:{user['id']}"
+    guest_id = session.get("guest_id")
+    return f"guest:{guest_id}" if guest_id else ""
+
+
+def media_hub_guess(name):
+    """Create useful offline metadata from a filename without web services."""
+    stem = Path(str(name or "")).stem
+    match = re.search(r"(?i)(.*?)[ ._\-]+S(\d{1,2})E(\d{1,3})(?:[ ._\-]+(.*))?$", stem)
+    if match:
+        series = re.sub(r"[._]+", " ", match.group(1)).strip(" -") or stem
+        episode_title = re.sub(r"[._]+", " ", match.group(4) or "").strip(" -")
+        season, episode = int(match.group(2)), int(match.group(3))
+        title = episode_title or f"Episode {episode}"
+        return {"title": title, "media_kind": "episode", "series_title": series,
+                "season": season, "episode": episode, "category": "Series"}
+    title = re.sub(r"[._]+", " ", stem)
+    title = re.sub(r"\s+", " ", title).strip(" -") or stem
+    return {"title": title, "media_kind": "movie", "series_title": "",
+            "season": 0, "episode": 0, "category": "Movies"}
+
+
+def make_video_thumb(source, force=False):
+    """Extract a local poster frame. Failure leaves a safe generic card."""
+    try:
+        stat = source.stat()
+        identity = f"video-poster|{rel(source)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", "surrogatepass")
+        name = hashlib.sha256(identity).hexdigest() + ".jpg"
+        output = THUMBS / name
+        if output.is_file() and output.stat().st_size and not force:
+            return name
+        executable = ffmpeg_executable()
+        if not executable:
+            return None
+        THUMBS.mkdir(parents=True, exist_ok=True)
+        temp = output.with_suffix(".part.jpg")
+        command = [executable, "-hide_banner", "-loglevel", "error", "-y", "-ss", "3",
+                   "-i", str(source), "-frames:v", "1", "-vf",
+                   "scale=720:-2:force_original_aspect_ratio=decrease", "-q:v", "3", str(temp)]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=90,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if completed.returncode == 0 and temp.is_file() and temp.stat().st_size:
+            os.replace(temp, output)
+            return name
+        temp.unlink(missing_ok=True)
+    except Exception as exc:
+        server_event(f"Video poster generation failed: {exc}", "WARNING")
+    return None
+
+
+def _media_hub_generate_poster(asset_id, path):
+    try:
+        source = safe(path)
+        poster = make_video_thumb(source)
+        if poster:
+            connection = db()
+            connection.execute("UPDATE assets SET thumb=? WHERE id=?", (poster, asset_id))
+            connection.execute("UPDATE media_hub_items SET poster=?,updated_at=? WHERE asset_id=?", (poster, time.time(), asset_id))
+            connection.commit()
+            connection.close()
+    except Exception as exc:
+        server_event(f"Media Hub poster task failed for {path}: {exc}", "WARNING")
+
+
+def _media_hub_scope(scope, prefix="a."):
+    scope = normalize_scope(scope)
+    if not scope:
+        return "", ()
+    return f" AND ({prefix}path=? OR {prefix}path LIKE ?)", (scope, scope + "/%")
+
+
+def _media_hub_payload(row):
+    item = dict(row)
+    item["path"] = item.get("path") or ""
+    item["poster"] = item.get("poster") or item.get("asset_thumb") or ""
+    item["poster_url"] = url_for("getthumb", n=item["poster"]) if item["poster"] else ""
+    item["watchlisted"] = bool(item.get("watchlisted"))
+    item["featured"] = bool(item.get("featured"))
+    item["completed"] = bool(item.get("completed"))
+    item["preview_allowed"] = session_has_perm("preview")
+    item["download_allowed"] = session_has_perm("download")
+    item["kind"] = "video"
+    return item
+
+
+@app.get("/api/media-hub")
+def media_hub_home():
+    guard = require_perm("preview")
+    if guard: return guard
+    viewer = media_hub_viewer_key()
+    scope_clause, scope_params = _media_hub_scope(current_scope())
+    query = """SELECT m.*,a.id,a.path,a.name,a.ext,a.size,a.mtime,a.thumb AS asset_thumb,
+               COALESCE(p.position,0) AS position,COALESCE(p.duration,0) AS duration,
+               COALESCE(p.completed,0) AS completed,COALESCE(p.updated_at,0) AS progress_updated,
+               CASE WHEN w.asset_id IS NULL THEN 0 ELSE 1 END AS watchlisted
+               FROM media_hub_items m JOIN assets a ON a.id=m.asset_id
+               LEFT JOIN media_hub_progress p ON p.asset_id=a.id AND p.viewer_key=?
+               LEFT JOIN media_hub_watchlist w ON w.asset_id=a.id AND w.viewer_key=?
+               WHERE a.ext IN ({}){} ORDER BY m.added_at DESC""".format(
+                   ",".join("?" for _ in VIDEO_EXTS), scope_clause)
+    connection = db()
+    rows = connection.execute(query, (viewer, viewer) + tuple(sorted(VIDEO_EXTS)) + scope_params).fetchall()
+    connection.close()
+    items = [_media_hub_payload(row) for row in rows]
+    search = str(request.args.get("q") or "").strip().casefold()
+    if search:
+        items = [x for x in items if search in " ".join((x.get("title", ""), x.get("series_title", ""),
+                                                         x.get("description", ""), x.get("category", ""))).casefold()]
+    continue_watching = sorted(
+        [x for x in items if x["position"] > 10 and not x["completed"] and x["duration"] > 0],
+        key=lambda x: x["progress_updated"], reverse=True)[:20]
+    watchlist = [x for x in items if x["watchlisted"]][:30]
+    featured = next((x for x in items if x["featured"]), items[0] if items else None)
+    movies = [x for x in items if x["media_kind"] != "episode"]
+    series = {}
+    for item in items:
+        if item["media_kind"] == "episode":
+            series.setdefault(item["series_title"] or "Series", []).append(item)
+    series_rows = []
+    for title, episodes in series.items():
+        episodes.sort(key=lambda x: (x["season"], x["episode"], x["title"]))
+        lead = dict(episodes[0])
+        lead.update({"title": title, "media_kind": "series", "episode_count": len(episodes), "episodes": episodes})
+        series_rows.append(lead)
+    categories = {}
+    for item in movies:
+        categories.setdefault(item["category"] or "Movies", []).append(item)
+    return jsonify(ok=True, featured=featured, continue_watching=continue_watching,
+                   watchlist=watchlist, recently_added=items[:30], movies=movies,
+                   series=series_rows, categories=categories, total=len(items))
+
+
+@app.get("/api/media-hub/items/<int:asset_id>")
+def media_hub_details(asset_id):
+    guard = require_perm("preview")
+    if guard: return guard
+    viewer = media_hub_viewer_key()
+    scope_clause, scope_params = _media_hub_scope(current_scope())
+    connection = db()
+    row = connection.execute("""SELECT m.*,a.id,a.path,a.name,a.ext,a.size,a.mtime,a.thumb AS asset_thumb,
+            COALESCE(p.position,0) AS position,COALESCE(p.duration,0) AS duration,
+            COALESCE(p.completed,0) AS completed,CASE WHEN w.asset_id IS NULL THEN 0 ELSE 1 END AS watchlisted
+            FROM media_hub_items m JOIN assets a ON a.id=m.asset_id
+            LEFT JOIN media_hub_progress p ON p.asset_id=a.id AND p.viewer_key=?
+            LEFT JOIN media_hub_watchlist w ON w.asset_id=a.id AND w.viewer_key=?
+            WHERE a.id=?""" + scope_clause, (viewer, viewer, asset_id) + scope_params).fetchone()
+    if not row:
+        connection.close(); return jsonify(error="Media item not found"), 404
+    item = _media_hub_payload(row)
+    episodes = []
+    if item["media_kind"] == "episode" and item["series_title"]:
+        episode_rows = connection.execute("""SELECT m.*,a.id,a.path,a.name,a.ext,a.size,a.mtime,a.thumb AS asset_thumb,
+                COALESCE(p.position,0) AS position,COALESCE(p.duration,0) AS duration,
+                COALESCE(p.completed,0) AS completed,CASE WHEN w.asset_id IS NULL THEN 0 ELSE 1 END AS watchlisted
+                FROM media_hub_items m JOIN assets a ON a.id=m.asset_id
+                LEFT JOIN media_hub_progress p ON p.asset_id=a.id AND p.viewer_key=?
+                LEFT JOIN media_hub_watchlist w ON w.asset_id=a.id AND w.viewer_key=?
+                WHERE m.series_title=?""" + scope_clause + " ORDER BY m.season,m.episode,m.title",
+                (viewer, viewer, item["series_title"]) + scope_params).fetchall()
+        episodes = [_media_hub_payload(x) for x in episode_rows]
+    connection.close()
+    return jsonify(item=item, episodes=episodes)
+
+
+@app.post("/api/media-hub/progress/<int:asset_id>")
+def media_hub_save_progress(asset_id):
+    guard = require_perm("preview")
+    if guard: return guard
+    viewer = media_hub_viewer_key()
+    if not viewer: return jsonify(error="Authentication required"), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        position = max(0.0, float(data.get("position") or 0))
+        duration = max(0.0, float(data.get("duration") or 0))
+    except (TypeError, ValueError):
+        return jsonify(error="Invalid playback progress"), 400
+    if duration:
+        position = min(position, duration)
+    completed = 1 if duration > 0 and (position >= duration - 20 or position / duration >= .94) else 0
+    scope_clause, scope_params = _media_hub_scope(current_scope())
+    connection = db()
+    exists = connection.execute("SELECT 1 FROM media_hub_items m JOIN assets a ON a.id=m.asset_id WHERE a.id=?" + scope_clause,
+                                (asset_id,) + scope_params).fetchone()
+    if not exists:
+        connection.close(); return jsonify(error="Media item not found"), 404
+    connection.execute("""INSERT INTO media_hub_progress(viewer_key,asset_id,position,duration,completed,updated_at)
+        VALUES(?,?,?,?,?,?) ON CONFLICT(viewer_key,asset_id) DO UPDATE SET position=excluded.position,
+        duration=excluded.duration,completed=excluded.completed,updated_at=excluded.updated_at""",
+        (viewer, asset_id, position, duration, completed, time.time()))
+    connection.commit(); connection.close()
+    return jsonify(ok=True, completed=bool(completed))
+
+
+@app.post("/api/media-hub/watchlist/<int:asset_id>")
+def media_hub_toggle_watchlist(asset_id):
+    guard = require_perm("preview")
+    if guard: return guard
+    viewer = media_hub_viewer_key()
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    scope_clause, scope_params = _media_hub_scope(current_scope())
+    connection = db()
+    exists = connection.execute("SELECT 1 FROM media_hub_items m JOIN assets a ON a.id=m.asset_id WHERE a.id=?" + scope_clause,
+                                (asset_id,) + scope_params).fetchone()
+    if not exists:
+        connection.close(); return jsonify(error="Media item not found"), 404
+    if enabled:
+        connection.execute("INSERT OR IGNORE INTO media_hub_watchlist(viewer_key,asset_id,added_at) VALUES(?,?,?)",
+                           (viewer, asset_id, time.time()))
+    else:
+        connection.execute("DELETE FROM media_hub_watchlist WHERE viewer_key=? AND asset_id=?", (viewer, asset_id))
+    connection.commit(); connection.close()
+    return jsonify(ok=True, watchlisted=enabled)
+
+
+@app.get("/api/admin/media-hub/candidates")
+def media_hub_candidates():
+    guard = require_perm("manage_settings")
+    if guard: return guard
+    search = str(request.args.get("q") or "").strip()
+    where, params = "", []
+    if search:
+        where = " AND (a.name LIKE ? OR a.path LIKE ?)"
+        params.extend((f"%{search}%", f"%{search}%"))
+    connection = db()
+    rows = connection.execute("""SELECT a.id,a.path,a.name,a.ext,a.size,a.mtime,a.thumb,
+        CASE WHEN m.asset_id IS NULL THEN 0 ELSE 1 END AS selected,m.title,m.category,m.media_kind,
+        m.series_title,m.season,m.episode,m.featured,m.description
+        FROM assets a LEFT JOIN media_hub_items m ON m.asset_id=a.id
+        WHERE a.ext IN ({}){} ORDER BY selected DESC,a.mtime DESC LIMIT 500""".format(
+            ",".join("?" for _ in VIDEO_EXTS), where), tuple(sorted(VIDEO_EXTS)) + tuple(params)).fetchall()
+    connection.close()
+    return jsonify(items=[dict(row) for row in rows])
+
+
+@app.post("/api/admin/media-hub/items")
+def media_hub_add_items():
+    guard = require_perm("manage_settings")
+    if guard: return guard
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get("asset_ids") if isinstance(data.get("asset_ids"), list) else [data.get("asset_id")]
+    try:
+        asset_ids = sorted({int(x) for x in raw_ids if x is not None})
+    except (TypeError, ValueError):
+        return jsonify(error="Invalid media selection"), 400
+    if not asset_ids:
+        return jsonify(error="Select at least one video"), 400
+    connection = db(); added = []
+    for asset_id in asset_ids:
+        row = connection.execute("SELECT id,path,name,ext FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not row or row["ext"] not in VIDEO_EXTS:
+            continue
+        guessed = media_hub_guess(row["name"])
+        now = time.time()
+        cursor = connection.execute("""INSERT OR IGNORE INTO media_hub_items(
+            asset_id,title,category,media_kind,series_title,season,episode,added_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)""", (asset_id, guessed["title"], guessed["category"], guessed["media_kind"],
+            guessed["series_title"], guessed["season"], guessed["episode"], now, now))
+        if cursor.rowcount:
+            added.append(asset_id)
+            threading.Thread(target=_media_hub_generate_poster, args=(asset_id, row["path"]), daemon=True).start()
+    connection.commit(); connection.close()
+    log_activity("media_hub_add", ",".join(map(str, added)), f"Added {len(added)} video(s) to Media Hub.")
+    return jsonify(ok=True, added=added)
+
+
+@app.post("/api/admin/media-hub/items/<int:asset_id>")
+def media_hub_update_item(asset_id):
+    guard = require_perm("manage_settings")
+    if guard: return guard
+    data = request.get_json(silent=True) or {}
+    media_kind = str(data.get("media_kind") or "movie").lower()
+    if media_kind not in {"movie", "episode"}: media_kind = "movie"
+    try:
+        season = max(0, int(data.get("season") or 0)); episode = max(0, int(data.get("episode") or 0))
+    except (TypeError, ValueError):
+        return jsonify(error="Season and episode must be numbers"), 400
+    values = (str(data.get("title") or "").strip()[:240], str(data.get("description") or "").strip()[:4000],
+              str(data.get("category") or "Movies").strip()[:100], media_kind,
+              str(data.get("series_title") or "").strip()[:240], season, episode,
+              1 if data.get("featured") else 0, time.time(), asset_id)
+    connection = db()
+    cursor = connection.execute("""UPDATE media_hub_items SET title=?,description=?,category=?,media_kind=?,
+        series_title=?,season=?,episode=?,featured=?,updated_at=? WHERE asset_id=?""", values)
+    connection.commit(); connection.close()
+    if not cursor.rowcount: return jsonify(error="Media item not found"), 404
+    log_activity("media_hub_edit", str(asset_id), "Updated Media Hub metadata.")
+    return jsonify(ok=True)
+
+
+@app.delete("/api/admin/media-hub/items/<int:asset_id>")
+def media_hub_remove_item(asset_id):
+    guard = require_perm("manage_settings")
+    if guard: return guard
+    connection = db()
+    connection.execute("DELETE FROM media_hub_items WHERE asset_id=?", (asset_id,))
+    connection.execute("DELETE FROM media_hub_progress WHERE asset_id=?", (asset_id,))
+    connection.execute("DELETE FROM media_hub_watchlist WHERE asset_id=?", (asset_id,))
+    connection.commit(); connection.close()
+    log_activity("media_hub_remove", str(asset_id), "Removed item from Media Hub; original file was kept.")
+    return jsonify(ok=True)
+
+
+@app.get("/api/media-hub/subtitles/<int:asset_id>")
+def media_hub_subtitles(asset_id):
+    guard = require_perm("preview")
+    if guard: return guard
+    scope_clause, scope_params = _media_hub_scope(current_scope())
+    connection = db()
+    row = connection.execute("SELECT a.path FROM media_hub_items m JOIN assets a ON a.id=m.asset_id WHERE a.id=?" + scope_clause,
+                             (asset_id,) + scope_params).fetchone()
+    connection.close()
+    if not row: return jsonify(error="Media item not found"), 404
+    source = safe(row["path"])
+    tracks = []
+    try:
+        # Supports Movie.en.srt, Movie.bn.vtt and Movie.srt naming styles.
+        for candidate in source.parent.glob(source.stem + "*"):
+            if candidate.is_file() and candidate.suffix.lower() in {".srt", ".vtt"}:
+                tail = candidate.stem[len(source.stem):].strip(" ._- ")
+                label = tail.upper() if tail else "Subtitle"
+                tracks.append({"label": label, "srclang": (tail.split(".")[0].lower() if tail else "und")[:12],
+                               "url": url_for("subtitle_preview", p=rel(candidate))})
+    except OSError:
+        pass
+    return jsonify(tracks=tracks)
+
+
+@app.get("/subtitle/<path:p>")
+def subtitle_preview(p):
+    guard = require_perm("preview")
+    if guard: return guard
+    target = safe(p)
+    if target.suffix.lower() not in {".srt", ".vtt"}: abort(404)
+    try:
+        content = target.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        abort(404)
+    if target.suffix.lower() == ".srt":
+        content = "WEBVTT\n\n" + re.sub(r"(?m)(\d{2}:\d{2}:\d{2}),(\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}),(\d{3})",
+                                           r"\1.\2 --> \3.\4", content)
+    elif not content.lstrip().startswith("WEBVTT"):
+        content = "WEBVTT\n\n" + content
+    return Response(content, mimetype="text/vtt", headers={"Cache-Control": "private, max-age=300"})
 
 
 def build_compatible_video(source, key, output):
